@@ -1,0 +1,28 @@
+{
+  "name": "soizenfier-ext-functions",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "serve": "npx firebase emulators:start --only functions",
+    "functions:install": "npm install",
+    "functions:build": "npm run build",
+    "functions:serve": "npm run serve",
+    "functions:deploy": "npm run deploy",
+    "deploy": "npm run build && firebase deploy --only functions",
+    "start:emulators": "firebase emulators:start",
+    "emulators": "firebase emulators:start --only auth,firestore,functions,ui"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "main": "lib/index.js",
+  "dependencies": {
+    "firebase-admin": "^13.10.0",
+    "firebase-functions": "^7.2.5",
+    "stripe": "^12.11.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.14.0"
+  }
+}
