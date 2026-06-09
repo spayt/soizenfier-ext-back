@@ -97,7 +97,7 @@ async function updateUserSubscription(subscription: Stripe.Subscription) {
 }
 
 async function sendNewSubscriptionNotification(
-  invoice: Stripe.Invoice,
+  session: Stripe.Checkout.Session,
   subscription: Stripe.Subscription,
 ) {
   const isLocal = process.env.RUNNING_ON_LOCAL === "true";
@@ -110,14 +110,15 @@ async function sendNewSubscriptionNotification(
     return;
   }
 
-  const customerName  = (invoice.customer_name  ?? "").trim() || "Customer";
-  const customerEmail = (invoice.customer_email ?? "").trim();
-  const planName      = subscription.metadata?.planName || "Subscription Plan";
-  const amountPaid    = invoice.amount_paid;
-  const currency      = (invoice.currency ?? "cad").toUpperCase();
-  const amountFmt     = new Intl.NumberFormat("en-CA", {
+  const customerName  = (session.customer_details?.name  ?? "").trim() || "Customer";
+  const customerEmail = (session.customer_details?.email ?? "").trim();
+  const planName   = subscription.metadata?.planName || "Subscription Plan";
+  const priceItem  = subscription.items?.data?.[0]?.price;
+  const amountCents = priceItem?.unit_amount ?? 0;
+  const currency   = (priceItem?.currency ?? "cad").toUpperCase();
+  const amountFmt  = new Intl.NumberFormat("en-CA", {
     style: "currency", currency, minimumFractionDigits: 2,
-  }).format(amountPaid / 100);
+  }).format(amountCents / 100);
   const startDate = new Date(subscription.current_period_start * 1000)
     .toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
   const endDate = new Date(subscription.current_period_end * 1000)
@@ -224,6 +225,7 @@ async function handleSoizenfierStripeWebhook(
             : session.subscription.id;
         const subscription = await stripe.subscriptions.retrieve(subId);
         await updateUserSubscription(subscription);
+        await sendNewSubscriptionNotification(session, subscription);
       }
       break;
     }
@@ -235,9 +237,6 @@ async function handleSoizenfierStripeWebhook(
         const subId = typeof sub === "string" ? sub : (sub as Stripe.Subscription).id;
         const subscription = await stripe.subscriptions.retrieve(subId);
         await updateUserSubscription(subscription);
-        if (invoice.billing_reason === "subscription_create") {
-          await sendNewSubscriptionNotification(invoice, subscription);
-        }
       }
       break;
     }
