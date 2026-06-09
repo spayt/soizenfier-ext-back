@@ -280,8 +280,7 @@ export const SoiZenFierPaymentEvent = onRequest(
     }
 
     const isTest = await isTestMode();
-    const isLocal = process.env.RUNNING_ON_LOCAL === "true";
-    const useTestSecret = isTest || isLocal;
+    const useTestSecret = isTest;
 
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripeTestWebhookSecret =
@@ -448,8 +447,7 @@ export const createCheckoutSession = onRequest(
     }
 
     const isTest = await isTestMode();
-    const isLocal = process.env.RUNNING_ON_LOCAL === "true";
-    const useTestSecret = isTest || isLocal;
+    const useTestSecret = isTest;
 
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripe: Stripe = getStripe(
@@ -548,8 +546,7 @@ export const syncPlansToStripe = onRequest(
     }
 
     const isTest = await isTestMode();
-    const isLocal = process.env.RUNNING_ON_LOCAL === "true";
-    const useTestSecret = isTest || isLocal;
+    const useTestSecret = isTest;
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripe: Stripe = getStripe(
       useTestSecret ? stripeTestSecretKey! : STRIPE_LIVE_SECRET_KEY.value(),
@@ -655,8 +652,7 @@ export const syncUserSubscriptions = onRequest(
     }
 
     const isTest = await isTestMode();
-    const isLocal = process.env.RUNNING_ON_LOCAL === "true";
-    const useTestSecret = isTest || isLocal;
+    const useTestSecret = isTest;
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripe: Stripe = getStripe(
       useTestSecret ? stripeTestSecretKey! : STRIPE_LIVE_SECRET_KEY.value(),
@@ -728,8 +724,7 @@ export const createCustomerPortalSession = onRequest(
     }
 
     const isTest = await isTestMode();
-    const isLocal = process.env.RUNNING_ON_LOCAL === "true";
-    const useTestSecret = isTest || isLocal;
+    const useTestSecret = isTest;
 
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripe: Stripe = getStripe(
