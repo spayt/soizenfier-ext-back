@@ -2,6 +2,7 @@ import { onRequest } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
 import * as admin from "firebase-admin";
 import Stripe from "stripe";
+import sgMail from "@sendgrid/mail";
 import { GeneralParams, getStripe } from "./utils";
 import { defineSecret } from "firebase-functions/params";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
@@ -22,6 +23,7 @@ const STRIPE_LIVE_SECRET_KEY = defineSecret(
 const STRIPE_LIVE_WEBHOOK_SECRET = defineSecret(
   "SOIZENFIER_STRIPE_LIVE_WEBHOOK_SECRET",
 );
+const SENDGRID_API_KEY_SECRET = defineSecret("SOIZENFIER_SENDGRID_API_KEY");
 
 export const helloSoiZenFier = onRequest((req, res) => {
   logger.info("SoiZenFier Cloud Function called", { structuredData: true });
@@ -94,6 +96,118 @@ async function updateUserSubscription(subscription: Stripe.Subscription) {
   }
 }
 
+async function sendNewSubscriptionNotification(
+  invoice: Stripe.Invoice,
+  subscription: Stripe.Subscription,
+) {
+  const isLocal = process.env.RUNNING_ON_LOCAL === "true";
+  const sgKey = isLocal
+    ? (process.env.SOIZENFIER_SENDGRID_API_KEY ?? "")
+    : SENDGRID_API_KEY_SECRET.value();
+
+  if (!sgKey) {
+    logger.warn("SendGrid key not set — skipping subscription notification.");
+    return;
+  }
+
+  const customerName  = (invoice.customer_name  ?? "").trim() || "Customer";
+  const customerEmail = (invoice.customer_email ?? "").trim();
+  const planName      = subscription.metadata?.planName || "Subscription Plan";
+  const amountPaid    = invoice.amount_paid;
+  const currency      = (invoice.currency ?? "cad").toUpperCase();
+  const amountFmt     = new Intl.NumberFormat("en-CA", {
+    style: "currency", currency, minimumFractionDigits: 2,
+  }).format(amountPaid / 100);
+  const startDate = new Date(subscription.current_period_start * 1000)
+    .toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
+  const endDate = new Date(subscription.current_period_end * 1000)
+    .toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
+
+  sgMail.setApiKey(sgKey);
+  try {
+    await sgMail.send({
+      to:      { email: "admin@soizenfier.com", name: "SoiZenFier Technologies Inc." },
+      from:    { email: "noreply@soizenfier.com", name: "SoiZenFier Technologies Inc." },
+      replyTo: customerEmail ? { email: customerEmail, name: customerName } : undefined,
+      subject: `New subscription — ${planName} (${customerName})`,
+      html: buildSubscriptionEmail({
+        customerName, customerEmail, planName,
+        amountFmt, startDate, endDate,
+        subscriptionId: subscription.id,
+      }),
+    });
+    logger.info("Subscription notification sent", { subscriptionId: subscription.id });
+  } catch (err) {
+    logger.error("Failed to send subscription notification", err);
+  }
+}
+
+function buildSubscriptionEmail(p: {
+  customerName: string;
+  customerEmail: string;
+  planName: string;
+  amountFmt: string;
+  startDate: string;
+  endDate: string;
+  subscriptionId: string;
+}) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:48px 20px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,0.08);">
+        <tr>
+          <td style="background:#0f172a;padding:24px 36px;">
+            <p style="margin:0;font-size:16px;font-weight:800;color:#ffffff;">SoiZenFier Technologies</p>
+            <p style="margin:4px 0 0;font-size:12px;color:#94a3b8;">New subscription activated</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 36px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="padding-bottom:16px;border-bottom:1px solid #f1f5f9;">
+                  <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Customer</p>
+                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${p.customerName}</p>
+                  ${p.customerEmail ? `<a href="mailto:${p.customerEmail}" style="font-size:13px;color:#facc15;text-decoration:none;">${p.customerEmail}</a>` : ""}
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:16px 0;border-bottom:1px solid #f1f5f9;">
+                  <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Plan</p>
+                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${p.planName}</p>
+                  <p style="margin:2px 0 0;font-size:13px;color:#64748b;">${p.amountFmt} / month</p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:16px 0;border-bottom:1px solid #f1f5f9;">
+                  <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Billing period</p>
+                  <p style="margin:0;font-size:14px;color:#334155;">${p.startDate} → ${p.endDate}</p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding-top:16px;">
+                  <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Subscription ID</p>
+                  <p style="margin:0;font-size:12px;color:#94a3b8;font-family:'Courier New',monospace;">${p.subscriptionId}</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;padding:16px 36px;border-top:1px solid #e2e8f0;">
+            <p style="margin:0;font-size:12px;color:#94a3b8;">© ${new Date().getFullYear()} SoiZenFier Technologies Inc.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 async function handleSoizenfierStripeWebhook(
   event: Stripe.Event,
   stripe: Stripe,
@@ -121,6 +235,9 @@ async function handleSoizenfierStripeWebhook(
         const subId = typeof sub === "string" ? sub : (sub as Stripe.Subscription).id;
         const subscription = await stripe.subscriptions.retrieve(subId);
         await updateUserSubscription(subscription);
+        if (invoice.billing_reason === "subscription_create") {
+          await sendNewSubscriptionNotification(invoice, subscription);
+        }
       }
       break;
     }
@@ -140,7 +257,7 @@ async function handleSoizenfierStripeWebhook(
 
 export const SoiZenFierPaymentEvent = onRequest(
   {
-    secrets: [STRIPE_LIVE_SECRET_KEY, STRIPE_LIVE_WEBHOOK_SECRET],
+    secrets: [STRIPE_LIVE_SECRET_KEY, STRIPE_LIVE_WEBHOOK_SECRET, SENDGRID_API_KEY_SECRET],
   },
   async (req, res) => {
     res.set("Access-Control-Allow-Origin", "*");
