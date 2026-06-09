@@ -349,11 +349,13 @@ async function getOrCreateStripeCustomer(
   userId: string,
   email?: string | null,
   name?: string | null,
+  useTestMode = false,
 ) {
+  const customerField = useTestMode ? "stripeTestCustomerId" : "stripeCustomerId";
   const userRef = admin.firestore().collection("users").doc(userId);
   const userDoc = await userRef.get();
   const existingCustomerId = userDoc.exists
-    ? (userDoc.data()?.stripeCustomerId as string | undefined)
+    ? (userDoc.data()?.[customerField] as string | undefined)
     : undefined;
 
   if (existingCustomerId) return existingCustomerId;
@@ -369,7 +371,7 @@ async function getOrCreateStripeCustomer(
       uid: userId,
       email: email || null,
       displayName: name || null,
-      stripeCustomerId: customer.id,
+      [customerField]: customer.id,
       role: userDoc.exists
         ? (userDoc.data()?.role as string | undefined) || "User"
         : "User",
@@ -459,6 +461,7 @@ export const createCheckoutSession = onRequest(
       decodedUser.uid,
       decodedUser.email,
       decodedUser.name,
+      useTestSecret,
     );
 
     // Try to use a stored Stripe Price ID (created by syncPlansToStripe) for subscriptions.
@@ -640,23 +643,24 @@ export const syncUserSubscriptions = onRequest(
       return;
     }
 
-    const userRef = admin.firestore().collection("users").doc(decodedUser.uid);
-    const userDoc = await userRef.get();
-    const stripeCustomerId = userDoc.exists
-      ? (userDoc.data()?.stripeCustomerId as string | undefined)
-      : undefined;
-
-    if (!stripeCustomerId) {
-      res.status(400).json({ error: "No Stripe customer linked to this account." });
-      return;
-    }
-
     const isTest = await isTestMode();
     const useTestSecret = isTest;
     const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
     const stripe: Stripe = getStripe(
       useTestSecret ? stripeTestSecretKey! : STRIPE_LIVE_SECRET_KEY.value(),
     );
+
+    const customerField = useTestSecret ? "stripeTestCustomerId" : "stripeCustomerId";
+    const userRef = admin.firestore().collection("users").doc(decodedUser.uid);
+    const userDoc = await userRef.get();
+    const stripeCustomerId = userDoc.exists
+      ? (userDoc.data()?.[customerField] as string | undefined)
+      : undefined;
+
+    if (!stripeCustomerId) {
+      res.status(400).json({ error: "No Stripe customer linked to this account." });
+      return;
+    }
 
     // Fetch all subscriptions for this customer from Stripe
     const stripeSubscriptions = await stripe.subscriptions.list({
@@ -706,6 +710,15 @@ export const createCustomerPortalSession = onRequest(
       return;
     }
 
+    const isTest = await isTestMode();
+    const useTestSecret = isTest;
+
+    const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
+    const stripe: Stripe = getStripe(
+      useTestSecret ? stripeTestSecretKey! : STRIPE_LIVE_SECRET_KEY.value(),
+    );
+
+    const customerField = useTestSecret ? "stripeTestCustomerId" : "stripeCustomerId";
     const userDoc = await admin
       .firestore()
       .collection("users")
@@ -713,7 +726,7 @@ export const createCustomerPortalSession = onRequest(
       .get();
 
     const stripeCustomerId = userDoc.exists
-      ? (userDoc.data()?.stripeCustomerId as string | undefined)
+      ? (userDoc.data()?.[customerField] as string | undefined)
       : undefined;
 
     if (!stripeCustomerId) {
@@ -722,14 +735,6 @@ export const createCustomerPortalSession = onRequest(
         .json({ error: "No Stripe customer found for this user." });
       return;
     }
-
-    const isTest = await isTestMode();
-    const useTestSecret = isTest;
-
-    const stripeTestSecretKey = process.env.SOIZENFIER_STRIPE_TEST_SECRET_KEY;
-    const stripe: Stripe = getStripe(
-      useTestSecret ? stripeTestSecretKey! : STRIPE_LIVE_SECRET_KEY.value(),
-    );
 
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
