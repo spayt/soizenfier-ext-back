@@ -1,17 +1,18 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
-import * as admin from "firebase-admin";
+import { initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import Stripe from "stripe";
 import sgMail from "@sendgrid/mail";
 import { GeneralParams, getStripe } from "./utils";
 import { defineSecret } from "firebase-functions/params";
-import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { Timestamp, FieldValue, getFirestore } from "firebase-admin/firestore";
 import { appMonthlyPlans } from "./plans";
 import { escapeHtml, isPlanPrice, syncPlan } from "./stripePlans";
 
 export { sendEmailVerificationCode, verifyEmailVerificationCode } from "./emailVerification";
 
-admin.initializeApp();
+initializeApp();
 
 function toFirestoreTimestamp(seconds?: number | null) {
   if (seconds == null) return null;
@@ -40,7 +41,7 @@ async function updateUserSubscription(subscription: Stripe.Subscription) {
     return;
   }
 
-  const userRef = admin.firestore().collection("users").doc(firebaseUserId);
+  const userRef = getFirestore().collection("users").doc(firebaseUserId);
 
   const subscriptionData = {
     id: subscription.id,
@@ -320,7 +321,7 @@ async function verifyFirebaseUser(req: RequestWithHeaders) {
   if (!token) return null;
 
   try {
-    return await admin.auth().verifyIdToken(token);
+    return await getAuth().verifyIdToken(token);
   } catch (error) {
     logger.warn("Invalid Firebase auth token", { error });
     return null;
@@ -335,7 +336,7 @@ async function getOrCreateStripeCustomer(
   useTestMode = false,
 ) {
   const customerField = useTestMode ? "stripeTestCustomerId" : "stripeCustomerId";
-  const userRef = admin.firestore().collection("users").doc(userId);
+  const userRef = getFirestore().collection("users").doc(userId);
   const userDoc = await userRef.get();
   const existingCustomerId = userDoc.exists
     ? (userDoc.data()?.[customerField] as string | undefined)
@@ -460,7 +461,7 @@ export const createCheckoutSession = onRequest(
     // Fall back to inline price_data if not found.
     let lineItems: Stripe.Checkout.SessionCreateParams.LineItem[];
     if (plan) {
-      const pricingSnap = await admin.firestore().collection("config").doc("stripePricing").get();
+      const pricingSnap = await getFirestore().collection("config").doc("stripePricing").get();
       const priceField = useTestSecret ? "testPriceId" : "livePriceId";
       const storedPriceId = pricingSnap.exists
         ? (pricingSnap.data()?.[plan.id]?.[priceField] as string | undefined)
@@ -548,7 +549,7 @@ export const syncPlansToStripe = onRequest(
     const decodedUser = await verifyFirebaseUser(req);
     if (!decodedUser) { res.status(401).json({ error: "Authentication required." }); return; }
 
-    const userSnap = await admin.firestore().collection("users").doc(decodedUser.uid).get();
+    const userSnap = await getFirestore().collection("users").doc(decodedUser.uid).get();
     if (!userSnap.exists || userSnap.data()?.role !== "Administrator") {
       res.status(403).json({ error: "Administrator access required." });
       return;
@@ -562,7 +563,7 @@ export const syncPlansToStripe = onRequest(
     );
 
     const priceField = useTestSecret ? "testPriceId" : "livePriceId";
-    const pricingRef = admin.firestore().collection("config").doc("stripePricing");
+    const pricingRef = getFirestore().collection("config").doc("stripePricing");
     const pricingSnap = await pricingRef.get();
     const stored = (pricingSnap.exists ? pricingSnap.data() : {}) as Record<string, Record<string, string>>;
 
@@ -610,7 +611,7 @@ export const syncUserSubscriptions = onRequest(
     );
 
     const customerField = useTestSecret ? "stripeTestCustomerId" : "stripeCustomerId";
-    const userRef = admin.firestore().collection("users").doc(decodedUser.uid);
+    const userRef = getFirestore().collection("users").doc(decodedUser.uid);
     const userDoc = await userRef.get();
     const stripeCustomerId = userDoc.exists
       ? (userDoc.data()?.[customerField] as string | undefined)
@@ -678,8 +679,7 @@ export const createCustomerPortalSession = onRequest(
     );
 
     const customerField = useTestSecret ? "stripeTestCustomerId" : "stripeCustomerId";
-    const userDoc = await admin
-      .firestore()
+    const userDoc = await getFirestore()
       .collection("users")
       .doc(decodedUser.uid)
       .get();
@@ -714,8 +714,7 @@ export const createCustomerPortalSession = onRequest(
 );
 
 async function isTestMode(): Promise<boolean> {
-  const paramSnapShot = await admin
-    .firestore()
+  const paramSnapShot = await getFirestore()
     .collection("generalparameters")
     .get();
 

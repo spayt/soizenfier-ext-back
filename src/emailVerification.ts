@@ -1,6 +1,6 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
-import * as admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 import * as crypto from "crypto";
 import { defineSecret } from "firebase-functions/params";
 import sgMail from "@sendgrid/mail";
@@ -56,7 +56,7 @@ export const sendEmailVerificationCode = onRequest(
     const code = generateCode();
     const codeHash = sha256(code);
     const now = Date.now();
-    const db = admin.firestore();
+    const db = getFirestore();
     const docRef = db.collection("emailVerifications").doc(email);
 
     let rateLimited = false;
@@ -159,7 +159,7 @@ export const verifyEmailVerificationCode = onRequest(async (req, res) => {
   }
 
   const now = Date.now();
-  const db = admin.firestore();
+  const db = getFirestore();
   const docRef = db.collection("emailVerifications").doc(email);
 
   // Use an object so TypeScript doesn't narrow the property after the async callback

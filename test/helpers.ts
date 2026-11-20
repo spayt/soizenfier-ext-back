@@ -1,4 +1,5 @@
-import * as admin from "firebase-admin";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 
 const PROJECT_ID = "demo-soizenfier";
 
@@ -71,7 +72,7 @@ export async function resetEmulators() {
 /** Creates a real Auth emulator user and returns a genuine ID token for it. */
 export async function createUserWithToken(email: string, displayName?: string) {
   const password = "password123";
-  const user = await admin.auth().createUser({ email, password, displayName });
+  const user = await getAuth().createUser({ email, password, displayName });
   const response = await fetch(
     `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key`,
     {
@@ -85,7 +86,7 @@ export async function createUserWithToken(email: string, displayName?: string) {
 }
 
 export function db() {
-  return admin.firestore();
+  return getFirestore();
 }
 
 /** `isTestMode()` reads the first document of `generalparameters`. */
