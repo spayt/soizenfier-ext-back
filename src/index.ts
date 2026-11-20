@@ -7,6 +7,7 @@ import { GeneralParams, getStripe } from "./utils";
 import { defineSecret } from "firebase-functions/params";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
 import { appMonthlyPlans } from "./plans";
+import { escapeHtml, isPlanPrice, syncPlan } from "./stripePlans";
 
 export { sendEmailVerificationCode, verifyEmailVerificationCode } from "./emailVerification";
 
@@ -29,24 +30,6 @@ export const helloSoiZenFier = onRequest((req, res) => {
   logger.info("SoiZenFier Cloud Function called", { structuredData: true });
   res.send("Hello from SoiZenFier Technologies Inc Cloud Function!");
 });
-
-export const addMessage = onRequest(async (req, res) => {
-  const text =
-    typeof req.query.text === "string" ? req.query.text : req.body?.text;
-
-  if (!text || typeof text !== "string") {
-    res.status(400).send("Provide a text query param or JSON body.");
-    return;
-  }
-
-  const docRef = await admin.firestore().collection("messages").add({
-    text,
-    createdAt: FieldValue.serverTimestamp(),
-  });
-
-  res.send({ id: docRef.id, text });
-});
-
 
 async function updateUserSubscription(subscription: Stripe.Subscription) {
   const firebaseUserId = subscription.metadata?.firebaseUserId || null;
@@ -171,14 +154,14 @@ function buildSubscriptionEmail(p: {
               <tr>
                 <td style="padding-bottom:16px;border-bottom:1px solid #f1f5f9;">
                   <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Customer</p>
-                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${p.customerName}</p>
-                  ${p.customerEmail ? `<a href="mailto:${p.customerEmail}" style="font-size:13px;color:#facc15;text-decoration:none;">${p.customerEmail}</a>` : ""}
+                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${escapeHtml(p.customerName)}</p>
+                  ${p.customerEmail ? `<a href="mailto:${escapeHtml(p.customerEmail)}" style="font-size:13px;color:#facc15;text-decoration:none;">${escapeHtml(p.customerEmail)}</a>` : ""}
                 </td>
               </tr>
               <tr>
                 <td style="padding:16px 0;border-bottom:1px solid #f1f5f9;">
                   <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Plan</p>
-                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${p.planName}</p>
+                  <p style="margin:0;font-size:15px;font-weight:700;color:#0f172a;">${escapeHtml(p.planName)}</p>
                   <p style="margin:2px 0 0;font-size:13px;color:#64748b;">${p.amountFmt} / month</p>
                 </td>
               </tr>
@@ -191,7 +174,7 @@ function buildSubscriptionEmail(p: {
               <tr>
                 <td style="padding-top:16px;">
                   <p style="margin:0 0 2px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Subscription ID</p>
-                  <p style="margin:0;font-size:12px;color:#94a3b8;font-family:'Courier New',monospace;">${p.subscriptionId}</p>
+                  <p style="margin:0;font-size:12px;color:#94a3b8;font-family:'Courier New',monospace;">${escapeHtml(p.subscriptionId)}</p>
                 </td>
               </tr>
             </table>
@@ -417,7 +400,6 @@ export const createCheckoutSession = onRequest(
       title,
       amount,
       currency,
-      interval = "month",
       locale,
       successUrl,
       cancelUrl,
@@ -427,7 +409,6 @@ export const createCheckoutSession = onRequest(
       title?: string;
       amount?: number;
       currency?: string;
-      interval?: string;
       locale?: string;
       successUrl?: string;
       cancelUrl?: string;
@@ -445,6 +426,17 @@ export const createCheckoutSession = onRequest(
 
     if (mode !== "payment" && mode !== "subscription") {
       res.status(400).send("Invalid checkout mode.");
+      return;
+    }
+
+    // Subscriptions are always priced from the server-side plan list — never
+    // from the amount sent by the browser, which the user can tamper with.
+    const plan =
+      mode === "subscription"
+        ? appMonthlyPlans.find((p) => p.id === planId)
+        : undefined;
+    if (mode === "subscription" && !plan) {
+      res.status(400).send("A valid planId is required for subscriptions.");
       return;
     }
 
@@ -467,23 +459,40 @@ export const createCheckoutSession = onRequest(
     // Try to use a stored Stripe Price ID (created by syncPlansToStripe) for subscriptions.
     // Fall back to inline price_data if not found.
     let lineItems: Stripe.Checkout.SessionCreateParams.LineItem[];
-    if (planId && mode === "subscription") {
+    if (plan) {
       const pricingSnap = await admin.firestore().collection("config").doc("stripePricing").get();
       const priceField = useTestSecret ? "testPriceId" : "livePriceId";
       const storedPriceId = pricingSnap.exists
-        ? (pricingSnap.data()?.[planId]?.[priceField] as string | undefined)
+        ? (pricingSnap.data()?.[plan.id]?.[priceField] as string | undefined)
         : undefined;
 
+      // Only trust the stored price if Stripe confirms it still charges the
+      // plan amount (a stale sync must never charge an old price).
+      let storedPrice: Stripe.Price | undefined;
       if (storedPriceId) {
-        lineItems = [{ price: storedPriceId, quantity: 1 }];
+        try {
+          storedPrice = await stripe.prices.retrieve(storedPriceId);
+        } catch (err) {
+          logger.warn("Stored Stripe price could not be retrieved", { storedPriceId, err });
+        }
+        if (storedPrice && !isPlanPrice(storedPrice, plan)) {
+          logger.warn("Stored Stripe price does not match the plan — using inline price. Run \"Sync plans\".", {
+            planId: plan.id, storedPriceId, unitAmount: storedPrice.unit_amount,
+          });
+          storedPrice = undefined;
+        }
+      }
+
+      if (storedPrice) {
+        lineItems = [{ price: storedPrice.id, quantity: 1 }];
       } else {
         // Plan not yet synced to Stripe — fall back to inline price
         lineItems = [{
           price_data: {
-            currency: currency ?? "cad",
-            product_data: { name: title },
-            unit_amount: amount ?? 0,
-            recurring: { interval: interval === "year" ? "year" : "month" },
+            currency: plan.currency,
+            product_data: { name: plan.title },
+            unit_amount: plan.amountCents,
+            recurring: { interval: "month" },
           },
           quantity: 1,
         }];
@@ -494,9 +503,6 @@ export const createCheckoutSession = onRequest(
           currency: currency!,
           product_data: { name: title },
           unit_amount: amount!,
-          ...(mode === "subscription"
-            ? { recurring: { interval: interval === "year" ? "year" : "month" } }
-            : {}),
         },
         quantity: 1,
       }];
@@ -511,7 +517,7 @@ export const createCheckoutSession = onRequest(
         ...(mode === "subscription"
           ? {
               subscription_data: {
-                metadata: { firebaseUserId: decodedUser.uid, planName: title },
+                metadata: { firebaseUserId: decodedUser.uid, planName: plan!.title },
               },
             }
           : {}),
@@ -563,54 +569,7 @@ export const syncPlansToStripe = onRequest(
     const result: Record<string, { productId: string; priceId: string }> = {};
 
     for (const plan of appMonthlyPlans) {
-      // Find existing Stripe Product by appPlanId metadata
-      const search = await stripe.products.search({
-        query: `metadata['appPlanId']:'${plan.id}'`,
-      });
-
-      let productId: string;
-      if (search.data.length > 0) {
-        productId = search.data[0].id;
-        if (search.data[0].name !== plan.title) {
-          await stripe.products.update(productId, { name: plan.title });
-        }
-      } else {
-        const product = await stripe.products.create({
-          name: plan.title,
-          metadata: { appPlanId: plan.id },
-        });
-        productId = product.id;
-      }
-
-      // Check if existing stored price is still valid
-      const existingPriceId = stored[plan.id]?.[priceField];
-      let priceId: string;
-
-      if (existingPriceId) {
-        const existing = await stripe.prices.retrieve(existingPriceId);
-        if (existing.unit_amount === plan.amountCents && existing.currency === plan.currency && existing.active) {
-          priceId = existingPriceId;
-        } else {
-          await stripe.prices.update(existingPriceId, { active: false });
-          const newPrice = await stripe.prices.create({
-            product: productId,
-            unit_amount: plan.amountCents,
-            currency: plan.currency,
-            recurring: { interval: "month" },
-            metadata: { appPlanId: plan.id },
-          });
-          priceId = newPrice.id;
-        }
-      } else {
-        const newPrice = await stripe.prices.create({
-          product: productId,
-          unit_amount: plan.amountCents,
-          currency: plan.currency,
-          recurring: { interval: "month" },
-          metadata: { appPlanId: plan.id },
-        });
-        priceId = newPrice.id;
-      }
+      const { productId, priceId } = await syncPlan(stripe, plan);
 
       result[plan.id] = { productId, priceId };
       await pricingRef.set(

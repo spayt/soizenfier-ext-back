@@ -10,7 +10,11 @@
     "functions:deploy": "npm run deploy",
     "deploy": "npm run build && firebase deploy --only functions",
     "start:emulators": "firebase emulators:start",
-    "emulators": "firebase emulators:start --only auth,firestore,functions,ui"
+    "emulators": "firebase emulators:start --only auth,firestore,functions,ui",
+    "test": "cd .. && firebase emulators:exec --project demo-soizenfier --only auth,firestore 'npm --prefix functions run test:run'",
+    "test:run": "vitest run",
+    "test:coverage": "cd .. && firebase emulators:exec --project demo-soizenfier --only auth,firestore 'npm --prefix functions run test:run -- --coverage'",
+    "verify:stripe-prices": "tsx scripts/verify-stripe-prices.ts"
   },
   "engines": {
     "node": "22"
@@ -23,7 +27,12 @@
     "stripe": "^12.11.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/node": "^20.14.0",
-    "typescript": "^5.6.0"
+    "@vitest/coverage-v8": "^3.2.6",
+    "firebase": "^12.19.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.6"
   }
 }
