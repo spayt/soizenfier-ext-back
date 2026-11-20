@@ -16,7 +16,6 @@ import {
   syncUserSubscriptions,
   createCustomerPortalSession,
   SoiZenFierPaymentEvent,
-  helloSoiZenFier,
 } from "../src/index";
 import { appMonthlyPlans } from "../src/plans";
 import * as functionsIndex from "../src/index";
@@ -551,15 +550,10 @@ describe("SoiZenFierPaymentEvent", () => {
   });
 });
 
-// ── Small endpoints ──────────────────────────────────────────────────────────
+// ── Removed endpoints ──────────────────────────────────────────────────────────
 
-describe("helloSoiZenFier", () => {
-  it("responds", async () => {
-    const res = await call(helloSoiZenFier, { method: "GET" });
-    expect(res.body).toMatch(/SoiZenFier/);
-  });
-
-  it("the public, unauthenticated addMessage endpoint is gone", () => {
-    expect("addMessage" in functionsIndex).toBe(false);
+describe("removed endpoints", () => {
+  it.each(["addMessage", "helloSoiZenFier"])("%s is no longer exported (so not deployed)", (name) => {
+    expect(name in functionsIndex).toBe(false);
   });
 });

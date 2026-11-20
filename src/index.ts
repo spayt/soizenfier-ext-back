@@ -27,11 +27,6 @@ const STRIPE_LIVE_WEBHOOK_SECRET = defineSecret(
 );
 const SENDGRID_API_KEY_SECRET = defineSecret("SOIZENFIER_SENDGRID_API_KEY");
 
-export const helloSoiZenFier = onRequest((req, res) => {
-  logger.info("SoiZenFier Cloud Function called", { structuredData: true });
-  res.send("Hello from SoiZenFier Technologies Inc Cloud Function!");
-});
-
 async function updateUserSubscription(subscription: Stripe.Subscription) {
   const firebaseUserId = subscription.metadata?.firebaseUserId || null;
   if (!firebaseUserId) {
