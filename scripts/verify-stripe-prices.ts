@@ -11,6 +11,10 @@
  *   1. functions/src/plans.ts mirrors lib/pricing.ts (what the site displays).
  *   2. For each plan, a real test-mode Checkout Session built exactly like
  *      createCheckoutSession's inline fallback charges the expected amount.
+ *   4. A real test subscription (test card pm_card_visa) on the first synced
+ *      price: the billing period and the invoice → subscription link are read
+ *      correctly with the pinned API version (what the webhook relies on).
+ *      The customer and subscription are deleted afterwards.
  *   3. If the plans were synced to Stripe test mode (admin "Sync plans"),
  *      each product has exactly one active monthly price at the expected
  *      amount, and a Checkout Session using it charges that amount.
@@ -24,6 +28,8 @@ import { resolve } from "path";
 import Stripe from "stripe";
 import { appMonthlyPlans } from "../src/plans";
 import { syncPlan } from "../src/stripePlans";
+import { invoiceSubscriptionId, subscriptionPeriod } from "../src/stripeShapes";
+import { STRIPE_API_VERSION } from "../src/utils";
 import { monthlyPlans } from "../../lib/pricing";
 
 type Outcome = "PASS" | "FAIL" | "SKIP";
@@ -59,7 +65,7 @@ async function checkoutCharges(
 ) {
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
-    payment_method_types: ["card"],
+    allowed_payment_method_types: ["card"],
     line_items: [lineItem],
     success_url: "https://soizenfier.com/verify-stripe-prices/success",
     cancel_url: "https://soizenfier.com/verify-stripe-prices/cancel",
@@ -114,6 +120,44 @@ async function checkPlan(stripe: Stripe, plan: (typeof appMonthlyPlans)[number])
   } else {
     report("FAIL", `${label}: synced price ${matching[0].id} charges ${synced.amount} ${synced.currency}`);
   }
+  return matching[0].id;
+}
+
+// 4. Shape of real subscription and invoice objects for the pinned API version.
+async function checkSubscriptionShape(stripe: Stripe, plan: (typeof appMonthlyPlans)[number], priceId: string) {
+  const customer = await stripe.customers.create({
+    email: "verify-stripe-prices@example.com",
+    payment_method: "pm_card_visa",
+    invoice_settings: { default_payment_method: "pm_card_visa" },
+    metadata: { createdBy: "verify-stripe-prices" },
+  });
+  try {
+    const created = await stripe.subscriptions.create({
+      customer: customer.id,
+      items: [{ price: priceId }],
+      metadata: { createdBy: "verify-stripe-prices" },
+    });
+    const sub = await stripe.subscriptions.retrieve(created.id);
+    const period = subscriptionPeriod(sub);
+    if (sub.status === "active" && period.start && period.end && period.end > period.start) {
+      report("PASS", `subscription ${sub.id} (API ${STRIPE_API_VERSION}): active, period ${new Date(period.start * 1000).toISOString().slice(0, 10)} → ${new Date(period.end * 1000).toISOString().slice(0, 10)}`);
+    } else {
+      report("FAIL", `subscription ${sub.id}: status=${sub.status}, period=${JSON.stringify(period)}`);
+    }
+
+    const invoices = await stripe.invoices.list({ subscription: sub.id, limit: 1 });
+    const invoice = invoices.data[0];
+    if (!invoice) {
+      report("FAIL", `subscription ${sub.id}: no invoice found`);
+    } else if (invoiceSubscriptionId(invoice) === sub.id && invoice.amount_paid === plan.amountCents) {
+      report("PASS", `invoice ${invoice.id}: linked to ${sub.id}, paid ${invoice.amount_paid} ${invoice.currency}`);
+    } else {
+      report("FAIL", `invoice ${invoice.id}: subscription=${invoiceSubscriptionId(invoice)}, paid=${invoice.amount_paid}`);
+    }
+    await stripe.subscriptions.cancel(sub.id);
+  } finally {
+    await stripe.customers.del(customer.id);
+  }
 }
 
 async function main() {
@@ -122,7 +166,7 @@ async function main() {
     console.error("Refusing to run: SOIZENFIER_STRIPE_TEST_SECRET_KEY must be a Stripe TEST key (sk_test_…).");
     process.exit(2);
   }
-  const stripe = new Stripe(key, { apiVersion: "2022-11-15" });
+  const stripe = new Stripe(key, { apiVersion: STRIPE_API_VERSION });
 
   checkMirror();
 
@@ -137,12 +181,24 @@ async function main() {
     }
   }
 
+  let firstSynced: { plan: (typeof appMonthlyPlans)[number]; priceId: string } | undefined;
   for (const plan of appMonthlyPlans) {
     try {
-      await checkPlan(stripe, plan);
+      const priceId = await checkPlan(stripe, plan);
+      if (priceId && !firstSynced) firstSynced = { plan, priceId };
     } catch (err) {
       report("FAIL", `${plan.id}: Stripe API error — ${(err as Error).message}`);
     }
+  }
+
+  if (firstSynced) {
+    try {
+      await checkSubscriptionShape(stripe, firstSynced.plan, firstSynced.priceId);
+    } catch (err) {
+      report("FAIL", `subscription shape: Stripe API error — ${(err as Error).message}`);
+    }
+  } else {
+    report("SKIP", "subscription shape: no synced price (run with --fix first)");
   }
 
   const failed = results.filter((r) => r.outcome === "FAIL").length;

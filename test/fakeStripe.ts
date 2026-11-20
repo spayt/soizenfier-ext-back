@@ -141,7 +141,7 @@ export class FakeStripe {
     return price;
   }
 
-  /** Seeds a subscription shaped like the real `Stripe.Subscription` object. */
+  /** Seeds a subscription shaped like the real `Stripe.Subscription` object (API 2026-11-18.endive). */
   addSubscription(overrides: Obj = {}) {
     const sub = {
       id: this.nextId("sub"),
@@ -153,6 +153,9 @@ export class FakeStripe {
         object: "list",
         data: [{
           id: this.nextId("si"),
+          // Since API 2025-03-31 the billing period lives on each item.
+          current_period_start: 1_760_000_000,
+          current_period_end: 1_762_592_000,
           price: {
             id: "price_seed",
             unit_amount: 4950,
@@ -161,8 +164,6 @@ export class FakeStripe {
           },
         }],
       },
-      current_period_start: 1_760_000_000,
-      current_period_end: 1_762_592_000,
       cancel_at: null,
       canceled_at: null,
       ...overrides,

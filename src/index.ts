@@ -9,6 +9,7 @@ import { defineSecret } from "firebase-functions/params";
 import { Timestamp, FieldValue, getFirestore } from "firebase-admin/firestore";
 import { appMonthlyPlans } from "./plans";
 import { escapeHtml, isPlanPrice, syncPlan } from "./stripePlans";
+import { invoiceSubscriptionId, subscriptionPeriod } from "./stripeShapes";
 
 export { sendEmailVerificationCode, verifyEmailVerificationCode } from "./emailVerification";
 
@@ -38,6 +39,7 @@ async function updateUserSubscription(subscription: Stripe.Subscription) {
 
   const userRef = getFirestore().collection("users").doc(firebaseUserId);
 
+  const period = subscriptionPeriod(subscription);
   const subscriptionData = {
     id: subscription.id,
     planName: subscription.metadata?.planName || null,
@@ -47,10 +49,8 @@ async function updateUserSubscription(subscription: Stripe.Subscription) {
     currency: subscription.items?.data?.[0]?.price?.currency || null,
     interval:
       subscription.items?.data?.[0]?.price?.recurring?.interval || null,
-    current_period_start: toFirestoreTimestamp(
-      subscription.current_period_start,
-    ),
-    current_period_end: toFirestoreTimestamp(subscription.current_period_end),
+    current_period_start: toFirestoreTimestamp(period.start),
+    current_period_end: toFirestoreTimestamp(period.end),
     cancel_at: toFirestoreTimestamp(subscription.cancel_at),
     canceled_at: toFirestoreTimestamp(subscription.canceled_at),
     updatedAt: FieldValue.serverTimestamp(),
@@ -98,10 +98,13 @@ async function sendNewSubscriptionNotification(
   const amountFmt  = new Intl.NumberFormat("en-CA", {
     style: "currency", currency, minimumFractionDigits: 2,
   }).format(amountCents / 100);
-  const startDate = new Date(subscription.current_period_start * 1000)
-    .toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
-  const endDate = new Date(subscription.current_period_end * 1000)
-    .toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
+  const period = subscriptionPeriod(subscription);
+  const formatDate = (seconds: number | null) =>
+    seconds == null
+      ? "—"
+      : new Date(seconds * 1000).toLocaleDateString("en-CA", { year: "numeric", month: "long", day: "numeric" });
+  const startDate = formatDate(period.start);
+  const endDate = formatDate(period.end);
 
   sgMail.setApiKey(sgKey);
   try {
@@ -209,11 +212,12 @@ async function handleSoizenfierStripeWebhook(
       break;
     }
     // Fires once the invoice payment is confirmed — subscription is now "active".
+    // Endpoints may subscribe to either event (the test endpoint sends invoice.paid).
+    case "invoice.paid":
     case "invoice.payment_succeeded": {
       const invoice = event.data.object as Stripe.Invoice;
-      const sub = invoice.subscription;
-      if (sub) {
-        const subId = typeof sub === "string" ? sub : (sub as Stripe.Subscription).id;
+      const subId = invoiceSubscriptionId(invoice);
+      if (subId) {
         const subscription = await stripe.subscriptions.retrieve(subId);
         await updateUserSubscription(subscription);
       }
@@ -222,7 +226,10 @@ async function handleSoizenfierStripeWebhook(
     case "customer.subscription.created":
     case "customer.subscription.updated":
     case "customer.subscription.deleted": {
-      const subscription = event.data.object as Stripe.Subscription;
+      // Re-read the subscription so its shape follows this library's API
+      // version, whatever version the webhook endpoint is configured with.
+      const fromEvent = event.data.object as Stripe.Subscription;
+      const subscription = await stripe.subscriptions.retrieve(fromEvent.id);
       await updateUserSubscription(subscription);
       break;
     }
@@ -507,7 +514,7 @@ export const createCheckoutSession = onRequest(
     try {
       const session = await stripe.checkout.sessions.create({
         customer: stripeCustomerId,
-        payment_method_types: ["card"],
+        allowed_payment_method_types: ["card"],
         line_items: lineItems,
         mode: mode as Stripe.Checkout.SessionCreateParams.Mode,
         ...(mode === "subscription"

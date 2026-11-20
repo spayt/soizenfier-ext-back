@@ -103,6 +103,15 @@ describe("createCheckoutSession", () => {
     expect(priceData.recurring).toEqual({ interval: "month" });
   });
 
+  it("limits checkout to cards with the current API parameter", async () => {
+    const { authHeader } = await createUserWithToken("bob@example.com");
+    await call(createCheckoutSession, { headers: authHeader, body: checkoutBody() });
+    const params = fakeStripe.checkoutSessionsCreated[0];
+    expect(params.allowed_payment_method_types).toEqual(["card"]);
+    // Removed from Checkout in API 2026: sending it would be rejected.
+    expect(params).not.toHaveProperty("payment_method_types");
+  });
+
   it.each([
     ["an unknown planId", { planId: "free-forever" }],
     ["no planId", { planId: undefined }],
@@ -448,6 +457,44 @@ describe("SoiZenFierPaymentEvent", () => {
     const user = (await db().collection("users").doc("u1").get()).data()!;
     expect(user.uid).toBe("u1");
     expect(user.subscriptions[sub.id]).toMatchObject({ planName: "Growth Plan", status: "active" });
+    // The billing period now comes from the subscription item.
+    expect(user.subscriptions[sub.id].current_period_start.toMillis()).toBe(1_760_000_000_000);
+    expect(user.subscriptions[sub.id].current_period_end.toMillis()).toBe(1_762_592_000_000);
+  });
+
+  it("re-reads the subscription from Stripe, so an old-version webhook payload is handled", async () => {
+    const sub = fakeStripe.addSubscription({ metadata: { firebaseUserId: "u1" } });
+    // Payload as sent by an endpoint still on API 2022-11-15: period at the
+    // top level, items without it, and a stale status.
+    const legacyPayload = {
+      ...sub,
+      status: "incomplete",
+      current_period_start: 1_700_000_000,
+      current_period_end: 1_702_592_000,
+      items: { object: "list", data: [{ id: "si_legacy", price: sub.items.data[0].price }] },
+    };
+    await call(
+      SoiZenFierPaymentEvent,
+      signedRequest(subscriptionEvent("customer.subscription.updated", legacyPayload)),
+    );
+    const stored = (await db().collection("users").doc("u1").get()).data()!.subscriptions[sub.id];
+    expect(stored.status).toBe("active");
+    expect(stored.current_period_start.toMillis()).toBe(1_760_000_000_000);
+  });
+
+  it("records a deleted subscription as canceled", async () => {
+    const sub = fakeStripe.addSubscription({
+      status: "canceled",
+      canceled_at: 1_763_000_000,
+      metadata: { firebaseUserId: "u1" },
+    });
+    await call(
+      SoiZenFierPaymentEvent,
+      signedRequest(subscriptionEvent("customer.subscription.deleted", sub)),
+    );
+    const stored = (await db().collection("users").doc("u1").get()).data()!.subscriptions[sub.id];
+    expect(stored.status).toBe("canceled");
+    expect(stored.canceled_at.toMillis()).toBe(1_763_000_000_000);
   });
 
   it("updates one subscription as a nested field without touching the others", async () => {
@@ -510,14 +557,19 @@ describe("SoiZenFierPaymentEvent", () => {
     expect(mail.to.email).toBe("admin@soizenfier.com");
     expect(mail.replyTo).toEqual({ email: "bob@example.com", name: "Bob <script>" });
     expect(mail.html).toContain("$49.50");
+    expect(mail.html).not.toContain("Invalid Date");
+    expect(mail.html).toMatch(/October \d+, 2025 → November \d+, 2025/);
     // The customer controls their name: it must be escaped in the HTML.
     expect(mail.html).toContain("Bob &lt;script&gt;");
     expect(mail.html).not.toContain("<script>");
   });
 
-  it("on invoice.payment_succeeded, refreshes the subscription from Stripe", async () => {
+  it.each([
+    ["current API (invoice.parent)", (id: string) => ({ parent: { type: "subscription_details", subscription_details: { subscription: id } } })],
+    ["API 2022-11-15 (invoice.subscription)", (id: string) => ({ subscription: id })],
+  ])("on invoice.payment_succeeded, refreshes the subscription from Stripe — %s", async (_l, shape) => {
     const sub = fakeStripe.addSubscription({ metadata: { firebaseUserId: "u1" } });
-    const invoice = { id: "in_1", object: "invoice", subscription: sub.id };
+    const invoice = { id: "in_1", object: "invoice", ...shape(sub.id) };
     await call(
       SoiZenFierPaymentEvent,
       signedRequest(subscriptionEvent("invoice.payment_succeeded", invoice)),
@@ -525,6 +577,18 @@ describe("SoiZenFierPaymentEvent", () => {
     const user = (await db().collection("users").doc("u1").get()).data()!;
     expect(user.subscriptions[sub.id].status).toBe("active");
     expect(sgMail.send).not.toHaveBeenCalled();
+  });
+
+  it("handles invoice.paid the same way (event used by the configured endpoint)", async () => {
+    const sub = fakeStripe.addSubscription({ status: "active", metadata: { firebaseUserId: "u1" } });
+    const invoice = { id: "in_2", object: "invoice", subscription: sub.id };
+    const res = await call(
+      SoiZenFierPaymentEvent,
+      signedRequest(subscriptionEvent("invoice.paid", invoice)),
+    );
+    expect(res.statusCode).toBe(200);
+    const user = (await db().collection("users").doc("u1").get()).data()!;
+    expect(user.subscriptions[sub.id].status).toBe("active");
   });
 
   it("acknowledges unhandled event types", async () => {
